@@ -1,3 +1,4 @@
 pyTelegramBotAPI
-undetected-chromedriver
-selenium
+requests
+beautifulsoup4
+lxml
