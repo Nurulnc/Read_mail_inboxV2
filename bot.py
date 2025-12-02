@@ -1,139 +1,89 @@
-# bot.py - Termux এ 100% Working | Headless | Real Outlook Link Extractor
+# bot.py - 100% Working on Thegsmwork Free Hosting (No Selenium)
 from telebot import TeleBot, types
-import time
-import threading
+import requests
 import re
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-import os
+import json
+import time
+from bs4 import BeautifulSoup
 
 # তোমার বট টোকেন এখানে বসাও
 TOKEN = "8369983599:AAFq8R8qXplog8UOVUdBCqb4MP-Lrn3ufIw"  # ← চেঞ্জ করো
-
 bot = TeleBot(TOKEN)
 
-def get_driver():
-    options = uc.ChromeOptions()
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-features=VizDisplayCompositor")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-popup-blocking")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--headless=new")  # নতুন হেডলেস মোড
-    options.add_argument("--no-zygote")
-    options.add_argument("--single-process")
-    options.add_argument("--disable-dev-tools")
-    
-    driver = uc.Chrome(options=options, version_main=131)
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": """
-        Object.defineProperty(navigator, 'webdriver', {get: () => false});
-        window.navigator.chrome = {runtime: {}};
-        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-        """
-    })
-    return driver
-
-def extract_link(cookies, chat_id):
-    driver = None
+def extract_link_from_cookies(cookies_str):
     try:
-        bot.send_message(chat_id, "Chrome চালু হচ্ছে... (হেডলেস মোড)")
-        driver = get_driver()
+        session = requests.Session()
         
-        driver.get("https://outlook.live.com")
-        time.sleep(6)
-
-        # কুকিজ লোড
-        for cookie in cookies.split(';'):
+        # কুকিজ লোড করা
+        for cookie in cookies_str.split(';'):
             if '=' in cookie:
                 name, value = cookie.strip().split('=', 1)
-                try:
-                    driver.add_cookie({'name': name, 'value': value, 'domain': '.live.com'})
-                except:
-                    pass
+                session.cookies.set(name, value, domain='.outlook.com')
+                session.cookies.set(name, value, domain='.live.com')
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        }
+
+        # ইনবক্স ওপেন
+        inbox = session.get("https://outlook.live.com/mail/inbox", headers=headers, timeout=20)
         
-        driver.get("https://outlook.live.com/mail/inbox")
-        time.sleep(10)
+        if "sign" in inbox.text.lower() or inbox.status_code != 200:
+            return "কুকিজ এক্সপায়ার্ড বা ইনভ্যালিড!"
 
-        if "login" in driver.current_url or "signin" in driver.current_url:
-            bot.send_message(chat_id, "কুকিজ এক্সপায়ার্ড বা ভুল!")
-            return
-
-        bot.send_message(chat_id, "ইনবক্স ওপেন হয়েছে! TextNow মেইল খুঁজছি...")
-
-        # সর্বশেষ ২০টা মেইল চেক
-        mails = driver.find_elements(By.CSS_SELECTOR, "div[role='option']")[:20]
+        soup = BeautifulSoup(inbox.text, 'html.parser')
         
-        found = False
+        # সব মেইলের লিস্ট
+        mails = soup.find_all("div", {"role": "option"})[:25]
+
         for mail in mails:
-            try:
-                label = mail.get_attribute("aria-label") or ""
-                if any(k in label.lower() for k in ["textnow", "verify", "confirmation", "no-reply", "security"]):
-                    bot.send_message(chat_id, "TextNow মেইল পাওয়া গেছে! ওপেন করছি...")
-                    mail.click()
-                    time.sleep(7)
-                    found = True
-                    break
-            except:
-                continue
+            sender_text = mail.get("aria-label", "").lower()
+            if any(x in sender_text for x in ["textnow", "verify", "no-reply", "confirmation"]):
+                # এই মেইলের ভিতরে লিঙ্ক খুঁজি
+                body_text = str(mail) + inbox.text
+                links = re.findall(r'https?://[^\s<>"\']+', body_text)
+                
+                for link in links:
+                    l = link.lower()
+                    if len(link) > 60 and any(k in l for k in ["verify", "confirm", "click", "account.live.com", "microsoft.com"]):
+                        if "unsubscribe" not in l and "textnow" not in l:
+                            clean = link.split('&')[0]
+                            return f"""আসল ভেরিফিকেশন লিঙ্ক পাওয়া গেছে!
 
-        if not found:
-            bot.send_message(chat_id, "কোনো TextNow মেইল পাওয়া যায়নি। নতুন করে চেক করো।")
-            return
+`{clean}`
 
-        # লিঙ্ক বের করা
-        page = driver.page_source
-        links = re.findall(r'https?://[^\s<>"\']+', page)
-        
-        real_link = None
-        for link in links:
-            l = link.lower()
-            if len(link) > 60 and any(x in l for x in ["verify", "confirmation", "clickhere", "account", "live.com", "microsoft"]):
-                if "unsubscribe" not in l and "textnow.com" not in l:
-                    real_link = link.split('&')[0].split(' ')[0]
-                    break
+কপি করো → {clean}"""
 
-        if real_link:
-            short = real_link[:2000] + ("..." if len(real_link) > 2000 else "")
-            msg = f"""*আসল ভেরিফিকেশন লিঙ্ক পাওয়া গেছে!*
-
-`{short}`
-
-কপি করো → {real_link}"""
-
-            bot.send_message(chat_id, msg, parse_mode="Markdown", disable_web_page_preview=True)
-        else:
-            bot.send_message(chat_id, "লিঙ্ক পাওয়া যায়নি। মেইল ম্যানুয়ালি চেক করো।")
+        return "TextNow মেইল পাওয়া গেছে কিন্তু লিঙ্ক পাওয়া যায়নি।"
 
     except Exception as e:
-        bot.send_message(chat_id, f"Error: {str(e)}")
-    finally:
-        if driver:
-            driver.quit()
+        return f"এরর: {str(e)}"
 
 @bot.message_handler(commands=['start'])
 def start(m):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("Send Outlook Cookies")
-    bot.send_message(m.chat.id, 
-        "*আউটলুকের Full Cookies পাঠাও*\n\n"
-        "Chrome → Login → Cookie Editor → Export (Netscape) → পেস্ট করো",
+    bot.send_message(m.chat.id,
+        "*আউটলুক Full Cookies পাঠাও*\n\n"
+        "Chrome → Login → Cookie Editor → Export → পেস্ট করো\n"
+        "TextNow থেকে আসল লিঙ্ক বের করে দিব",
         parse_mode="Markdown", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: m.text and ("cookie" in m.text.lower() or len(m.text) > 500))
+@bot.message_handler(func=lambda m: m.text and len(m.text) > 400)
 def get_cookies(m):
-    cookies = m.text
-    bot.reply_to(m, "কুকিজ পেয়েছি! এখনই লিঙ্ক বের করছি...")
-    threading.Thread(target=extract_link, args=(cookies, m.chat.id)).start()
+    bot.reply_to(m, "কুকিজ পেয়েছি! লিঙ্ক বের করছি...")
+    time.sleep(2)
+    result = extract_link_from_cookies(m.text)
+    bot.send_message(m.chat.id, result, parse_mode="Markdown", disable_web_page_preview=True)
 
 @bot.message_handler(func=lambda m: True)
 def all(m):
     bot.reply_to(m, "কুকিজ পাঠাও বা /start দাও")
 
-print("Termux Real Outlook Bot চালু হলো...")
+print("Bot চালু হলো – Free Hosting Ready!")
 bot.infinity_polling()
