@@ -1,91 +1,72 @@
-# bot.py - 100% Working Real TN Receiver (December 2025 Fixed)
-from telebot import TeleBot, types
-import requests
+# ====== নতুন ফিচার: তোমার ফরম্যাটে (email|pass|cookies|id) পেস্ট করলে লিংক দেখাবে ======
 import re
-import json
-import time
+import requests
+from bs4 import BeautifulSoup
 
-TOKEN = "8369983599:AAFq8R8qXplog8UOVUdBCqb4MP-Lrn3ufIw"  # তোমার টোকেন
-bot = TeleBot(TOKEN)
+# /verify কমান্ড
+async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "*Verification Link Finder*\n\n"
+        "Paste account in this format:\n"
+        "`email|password|cookies|id`\n\n"
+        "Example:\n"
+        "`daniel@outlook.com|pass123|__Host-M...|user_id`",
+        parse_mode="Markdown"
+    )
 
-def extract_link(cookies_str):
+# কুকিজ পার্স করে লগইন
+async def process_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    
+    if "|" not in text or text.count("|") != 3:
+        await update.message.reply_text("Wrong format! Use: email|pass|cookies|id")
+        return
+    
+    email, password, cookies_str, user_id = text.split("|", 3)
+    
+    await update.message.reply_text("Logging in with cookies... 10-15 sec")
+    
     try:
-        s = requests.Session()
+        # কুকিজকে ডিকশনারিতে কনভার্ট
+        cookie_dict = {}
+        for part in cookies_str.split(";"):
+            if "=" in part:
+                k, v = part.strip().split("=", 1)
+                cookie_dict[k] = v
         
-        # কুকিজ লোড
-        for c in cookies_str.replace('\n', ';').split(';'):
-            if '=' in c and c.strip():
-                n, v = c.strip().split('=', 1)
-                s.cookies.set(n, v, domain='.outlook.com')
-                s.cookies.set(n, v, domain='.live.com')
-                s.cookies.set(n, v, domain='outlook.live.com')
-
-        # এই হেডারগুলো না দিলে 2025 এ কাজ করে না
+        session = requests.Session()
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Content-Type": "application/json",
-            "X-AnchorMailbox": "pitostoreyh1552@outlook.com",  # এটা ডাইনামিক করব পরে
-            "X-OWA-CANARY": "",  # পরে ফিল করব
-            "Referer": "https://outlook.live.com/mail/",
-            "Origin": "https://outlook.live.com",
-            "Connection": "keep-alive",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-
-        # প্রথমে CANARY টোকেন নিয়ে আসি (এটাই ম্যাজিক)
-        r1 = s.get("https://outlook.live.com/mail/", timeout=20)
-        canary = re.search(r'data-canary="(.*?)"', r1.text)
-        if not canary:
-            return "ক্যানারি টোকেন পাওয়া যায়নি। কুকিজ রিফ্রেশ করো।"
-        headers["X-OWA-CANARY"] = canary.group(1)
-
-        # এখন আসল API কল
-        api_url = "https://outlook.office.com/mail/api/v2.0/me/messages?$top=50&$select=Subject,From,BodyPreview,UniqueBody,ReceivedDateTime"
-        resp = s.get(api_url, headers=headers, timeout=25)
-
-        if resp.status_code != 200:
-            return f"স্ট্যাটাস কোড: {resp.status_code} — কুকিজ এক্সপায়ার্ড।"
-
-        data = resp.json()
-        for mail in data.get("value", []):
-            sender = mail.get("From", {}).get("EmailAddress", {}).get("Address", "").lower()
-            subject = mail.get("Subject", "").lower()
-            body = mail.get("UniqueBody", {}).get("Content", "").lower()
-
-            if any(x in (sender + subject + body) for x in ["textnow", "verify", "code", "confirmation"]):
-                links = re.findall(r'https?://[^\s<>"\']+', mail.get("UniqueBody", {}).get("Content", ""))
-                for link in links:
-                    if len(link) > 60 and any(k in link.lower() for k in ["verify", "confirm", "account.live.com", "login.live.com", "microsoft"]):
-                        if "unsubscribe" not in link.lower() and "textnow.com" not in link.lower():
-                            clean = link.split('&')[0].split('"')[0].strip()
-                            return f"""আসল লিঙ্ক পাওয়া গেছে!
-
-`{clean}`
-
-কপি করো: {clean}"""
-
-        return "TextNow মেইল পাওয়া গেছে কিন্তু লিঙ্ক নেই।"
-
+        
+        # Outlook ইনবক্সে যাওয়া
+        r = session.get("https://outlook.live.com/mail/inbox", cookies=cookie_dict, headers=headers, timeout=20)
+        
+        if "Sign in" in r.text or r.status_code != 200:
+            await update.message.reply_text("Failed — Cookies expired or invalid")
+            return
+        
+        soup = BeautifulSoup(r.text, 'html.parser')
+        links = []
+        
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if any(kw in href.lower() for kw in ["verify", "confirm", "activate", "click here", "complete", "login", "auth", "oauth"]):
+                if href.startswith("http") and len(href) > 30:
+                    links.append(href)
+        
+        if links:
+            msg = "*Verification Links Found!*\n\n"
+            for i, link in enumerate(links[:5], 1):
+                short = link[:80] + "..." if len(link) > 80 else link
+                msg += f"{i}. {short}\n\n"
+            await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+        else:
+            await update.message.reply_text("No verification link found in inbox")
+            
     except Exception as e:
-        return f"এরর: {str(e)[:120]}"
+        await update.message.reply_text(f"Error: {str(e)}")
 
-@bot.message_handler(commands=['start'])
-def start(m):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("Send Outlook Cookies")
-    bot.send_message(m.chat.id,
-        "*Real TN Receiver (2025 Working)*\n\n"
-        "আউটলুকের Full Cookies পাঠাও\n"
-        "TextNow থেকে আসল লিঙ্ক ৫-১০ সেকেন্ডে বের করবে\n\n"
-        "Chrome → Login → Cookie Editor → Export (Netscape) → পেস্ট করো",
-        parse_mode="Markdown", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: len(m.text or "") > 600)
-def get_cookies(m):
-    bot.reply_to(m, "কুকিজ পেয়েছি! আসল লিঙ্ক বের করছি...")
-    result = extract_link(m.text)
-    bot.send_message(m.chat.id, result, parse_mode="Markdown", disable_web_page_preview=True)
-
-print("2025 Final Working Bot চালু হলো")
-bot.infinity_polling()
+# main() এ যোগ করো
+app.add_handler(CommandHandler("verify", verify_command))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_account))  # যেকোনো টেক্সট পেলে চেক করবে
