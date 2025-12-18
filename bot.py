@@ -1,124 +1,94 @@
+import telebot
+import imaplib
+import email
 import re
-import asyncio
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs
+from email.header import decode_header
 
-# /verify কমান্ড
-async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "*Verification Link Finder 2025*\n\n"
-        "পেস্ট করো এই ফরম্যাটে:\n"
-        "`email|password|cookies|user_id`\n\n"
-        "উদাহরণ:\n"
-        "`example@outlook.com|pass123|__Host-...; csrftoken=...|123456789`",
-        parse_mode="Markdown"
-    )
+API_TOKEN = '8369983599:AAFq8R8qXplog8UOVUdBCqb4MP-Lrn3ufIw'
+bot = telebot.TeleBot(API_TOKEN)
 
-# মূল প্রসেসিং ফাংশন (ফিক্সড ভার্সন)
-async def process_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+def get_otp_and_links(body):
+    # ৫ থেকে ৮ ডিজিটের OTP খোঁজার জন্য
+    otp_pattern = r'\b\d{4,8}\b'
+    # লিঙ্ক খোঁজার জন্য
+    link_pattern = r'(https?://[^\s]+)'
     
-    if text.count("|") != 3:
-        await update.message.reply_text("❌ ভুল ফরম্যাট!\nসঠিক ফরম্যাট: `email|pass|cookies|id`")
-        return
+    otps = re.findall(otp_pattern, body)
+    links = re.findall(link_pattern, body)
+    return otps, links
 
+@bot.message_handler(commands=['start', 'get_otp'])
+def send_welcome(message):
+    bot.reply_to(message, "📥 আপনার ইমেইল ডেটা দিন।\nফরম্যাট: `email|password`", parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: "|" in message.text)
+def handle_mail(message):
     try:
-        email, password, cookies_str, user_id = text.split("|", 3)
-    except:
-        await update.message.reply_text("❌ স্প্লিট করতে সমস্যা হয়েছে")
-        return
+        user_data = message.text.split("|")
+        email_user = user_data[0].strip()
+        email_pass = user_data[1].strip()
 
-    await update.message.reply_text("🔄 কুকিজ দিয়ে লগইন করা হচ্ছে... (10-20 সেকেন্ড)")
+        bot.send_message(message.chat.id, "🔄 ইনবক্স চেক করা হচ্ছে...")
 
-    # কুকিজ পার্স
-    cookie_dict = {}
-    for part in cookies_str.split(";"):
-        part = part.strip()
-        if "=" in part:
-            k, v = part.split("=", 1)
-            cookie_dict[k] = v
+        # Outlook/Hotmail IMAP সংযোগ
+        mail = imaplib.IMAP4_SSL("imap-mail.outlook.com")
+        mail.login(email_user, email_pass)
+        mail.select("inbox")
 
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    })
-
-    try:
-        # এই URL-টাই এখনো কুকিজ দিয়ে সরাসরি কাজ করে (2025 পর্যন্ত টেস্টেড)
-        r = session.get(
-            "https://outlook.live.com/owa/",
-            cookies=cookie_dict,
-            allow_redirects=True,
-            timeout=25
-        )
-
-        # যদি লগইন পেজে রিডাইরেক্ট হয়
-        if "login.microsoftonline.com" in r.url or "Sign in" in r.text or r.status_code != 200:
-            await update.message.reply_text("❌ কুকিজ এক্সপায়ার্ড অথবা ইনভ্যালিড")
+        # সর্বশেষ ইমেইলটি খুঁজে বের করা
+        status, messages = mail.search(None, "ALL")
+        mail_ids = messages[0].split()
+        
+        if not mail_ids:
+            bot.send_message(message.chat.id, "❌ ইনবক্সে কোনো মেইল পাওয়া যায়নি।")
             return
 
-        # Inbox-এ যাওয়ার জন্য OWA-র API endpoint
-        inbox_url = "https://outlook.live.com/mail/inbox"
-        r2 = session.get(inbox_url, cookies=cookie_dict, timeout=25)
+        latest_id = mail_ids[-1]
+        status, msg_data = mail.fetch(latest_id, "(RFC822)")
 
-        if r2.status_code != 200:
-            await update.message.reply_text("❌ Inbox লোড করতে ফেইল (কুকিজে সমস্যা)")
-            return
+        for response_part in msg_data:
+            if isinstance(response_part, tuple):
+                msg = email.message_from_bytes(response_part[1])
+                
+                # ইমেইল সাবজেক্ট ডিকোড করা
+                subject, encoding = decode_header(msg["Subject"])[0]
+                if isinstance(subject, bytes):
+                    subject = subject.decode(encoding if encoding else "utf-8")
 
-        soup = BeautifulSoup(r2.text, 'html.parser')
-        links = set()  # ডুপ্লিকেট এড়ানোর জন্য
+                # বডি থেকে টেক্সট বের করা
+                body = ""
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        content_type = part.get_content_type()
+                        if content_type == "text/plain":
+                            body = part.get_payload(decode=True).decode()
+                            break
+                else:
+                    body = msg.get_payload(decode=True).decode()
 
-        keywords = [
-            "verify", "confirm", "activate", "verification", "click here", "complete setup",
-            "secure your account", "action required", "email preferences", "login", "auth", "oauth",
-            "click the button below", "finish setting up"
-        ]
+                # OTP এবং লিঙ্ক ফিল্টার করা
+                otps, links = get_otp_and_links(body)
 
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            text_lower = a.get_text().lower() + href.lower()
+                response = f"📧 **Subject:** {subject}\n"
+                response += "--------------------------\n"
+                
+                if otps:
+                    response += f"🔢 **OTP Found:** `{otps[0]}`\n" # প্রথম যে কোডটি পাবে
+                
+                if links:
+                    # প্রথম ২-৩টি লিঙ্ক হাইলাইট করা (ভেরিফাই লিঙ্কের জন্য)
+                    response += f"\n🔗 **Verification Links:**\n"
+                    for link in links[:2]: 
+                        response += f"{link}\n"
+                
+                if not otps and not links:
+                    response += "⚠️ কোনো কোড বা লিঙ্ক পাওয়া যায়নি, কিন্তু মেইল এসেছে।"
 
-            if any(kw in text_lower for kw in keywords):
-                if href.startswith("http") and len(href) > 25:
-                    links.add(href)
+                bot.send_message(message.chat.id, response, disable_web_page_preview=True, parse_mode="Markdown")
+        
+        mail.logout()
 
-        # Unseen মেইল থেকেও লিংক বের করা (অতিরিক্ত সেফটি)
-        try:
-            unseen = session.get("https://outlook.live.com/mail/inbox/unseen", cookies=cookie_dict)
-            if unseen.status_code == 200:
-                soup2 = BeautifulSoup(unseen.text, 'html.parser')
-                for a in soup2.find_all("a", href=True):
-                    href = a["href"]
-                    text_lower = a.get_text().lower() + href.lower()
-                    if any(kw in text_lower for kw in keywords):
-                        if href.startswith("http") and len(href) > 25:
-                            links.add(href)
-        except:
-            pass
-
-        if links:
-            msg = f"✅ *{len(links)}টা ভেরিফিকেশন লিংক পাওয়া গেছে!*\n\n"
-            for i, link in enumerate(list(links)[:7], 1):
-                short = link[:90] + "..." if len(link) > 90 else link
-                msg += f"{i}. {short}\n\n"
-            await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
-        else:
-            await update.message.reply_text("⚠️ কোনো ভেরিফিকেশন লিংক পাওয়া যায়নি (হয়তো মেইল আসেনি বা স্প্যামে)")
-
-    except requests.exceptions.Timeout:
-        await update.message.reply_text("⏰ টাইমআউট! কুকিজ ঠিক আছে কিন্তু Microsoft ব্লক করছে। ১০ মিনিট পর ট্রাই করো।")
     except Exception as e:
-        await update.message.reply_text(f"❌ এরর: {str(e)}")
+        bot.send_message(message.chat.id, "❌ লগইন ফেইল! ইমেইল/পাসওয়ার্ড চেক করুন অথবা IMAP অন আছে কি না দেখুন।")
 
-
-# main.py তে যোগ করো
-from telegram.ext import CommandHandler, MessageHandler, filters
-
-app.add_handler(CommandHandler("verify", verify_command))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_account))
+bot.polling()
